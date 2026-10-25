@@ -7,6 +7,24 @@ Packaged for PyInstaller (macOS .app bundle)
 
 import sys
 import os
+
+# --- Add standard macOS binary directories to PATH ---
+# macOS GUI bundles do not load the shell profile.
+# This ensures Python and child processes can locate ffmpeg.
+common_paths = [
+    "/opt/homebrew/bin",  # Homebrew on Apple Silicon
+    "/usr/local/bin",     # Homebrew on Intel
+    os.path.expanduser("~/bin"),
+    os.path.expanduser("~/.local/bin"),
+]
+
+current_path = os.environ.get("PATH", "")
+paths_to_add = [p for p in common_paths if os.path.isdir(p) and p not in current_path]
+
+if paths_to_add:
+    os.environ["PATH"] = ":".join(paths_to_add) + ":" + current_path
+# -----------------------------------------------------
+
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
