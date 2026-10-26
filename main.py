@@ -34,12 +34,148 @@ from PIL import Image, ImageTk, ImageDraw
 from audio_engine import AudioEngine
 from video_renderer import VideoRenderer, VISUALIZER_STYLES
 
+class ActionButton(tk.Label):
+    """
+    High-contrast, cross-platform interactive button built on tk.Label.
+    Solves macOS Aqua Tkinter limitations where native NSButton ignores custom
+    background colors and renders low-contrast white/silver boxes with faint text.
+    """
+    def __init__(
+        self,
+        master,
+        text="",
+        command=None,
+        bg="#0284C7",
+        fg="#FFFFFF",
+        hover_bg=None,
+        active_bg=None,
+        disabled_bg="#1E293B",
+        disabled_fg="#64748B",
+        font=("Helvetica", 10, "bold"),
+        padx=14,
+        pady=8,
+        cursor="hand2",
+        **kwargs
+    ):
+        self.command = command
+        self.default_bg = bg
+        self.default_fg = fg
+        self.hover_bg = hover_bg or bg
+        self.active_bg = active_bg or hover_bg or bg
+        self.disabled_bg = disabled_bg
+        self.disabled_fg = disabled_fg
+        self._state = "normal"
+        self._pressed = False
+
+        super().__init__(
+            master,
+            text=text,
+            bg=bg,
+            fg=fg,
+            font=font,
+            padx=padx,
+            pady=pady,
+            cursor=cursor,
+            relief="flat",
+            takefocus=True,
+            **kwargs
+        )
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<KeyPress-Return>", self._on_key_press)
+        self.bind("<KeyRelease-Return>", self._on_key_release)
+        self.bind("<KeyPress-space>", self._on_key_press)
+        self.bind("<KeyRelease-space>", self._on_key_release)
+
+    def _on_enter(self, event):
+        if self._state == "normal":
+            super().configure(bg=self.active_bg if self._pressed else self.hover_bg)
+
+    def _on_leave(self, event):
+        if self._state == "normal":
+            super().configure(bg=self.default_bg)
+
+    def _on_press(self, event):
+        if self._state == "normal":
+            self._pressed = True
+            super().configure(bg=self.active_bg)
+
+    def _on_release(self, event):
+        if self._state == "normal" and self._pressed:
+            self._pressed = False
+            if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
+                super().configure(bg=self.hover_bg)
+                if self.command:
+                    self.command()
+            else:
+                super().configure(bg=self.default_bg)
+
+    def _on_focus_in(self, event):
+        if self._state == "normal":
+            self.configure(highlightthickness=2, highlightbackground="#38BDF8", highlightcolor="#38BDF8")
+
+    def _on_focus_out(self, event):
+        self.configure(highlightthickness=0)
+
+    def _on_key_press(self, event):
+        if self._state == "normal":
+            super().configure(bg=self.active_bg)
+
+    def _on_key_release(self, event):
+        if self._state == "normal":
+            super().configure(bg=self.default_bg)
+            if self.command:
+                self.command()
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            self._state = kwargs.pop("state")
+            if self._state == "disabled":
+                self._pressed = False
+                super().configure(
+                    bg=self.disabled_bg,
+                    fg=self.disabled_fg,
+                    cursor="arrow",
+                    highlightthickness=0
+                )
+            else:
+                super().configure(
+                    bg=self.default_bg,
+                    fg=self.default_fg,
+                    cursor="hand2"
+                )
+        if "bg" in kwargs:
+            self.default_bg = kwargs["bg"]
+        if "background" in kwargs:
+            self.default_bg = kwargs["background"]
+        if "fg" in kwargs:
+            self.default_fg = kwargs["fg"]
+        if "foreground" in kwargs:
+            self.default_fg = kwargs["foreground"]
+        if "command" in kwargs:
+            self.command = kwargs.pop("command")
+        super().configure(**kwargs)
+
+    config = configure
+
+    def cget(self, key):
+        if key == "state":
+            return self._state
+        return super().cget(key)
+
+    __getitem__ = cget
+
 class PulseWaveApp:
     def __init__(self, root):
         self.root = root
         self.root.title("PulseWave - Audio Visualizer Studio")
-        self.root.geometry("1100x750")
-        self.root.minsize(950, 650)
+        self.root.geometry("1150x800")
+        self.root.minsize(1000, 720)
         self.root.configure(bg="#0B0F19")
 
         # Application state
@@ -48,6 +184,8 @@ class PulseWaveApp:
         self.video_renderer = VideoRenderer()
         self.is_rendering = False
         self.preview_image = None
+        self.bg_image_path = None
+        self.bg_image_pil = None
         
         # Style variables
         self.var_style = tk.StringVar(value="circular-spectrum")
@@ -59,6 +197,8 @@ class PulseWaveApp:
         self.var_theme = tk.StringVar(value="Cyber Neon (Cyan & Pink)")
         self.var_particles = tk.BooleanVar(value=True)
         self.var_text_overlay = tk.BooleanVar(value=True)
+        self.var_text_scale = tk.DoubleVar(value=1.0)
+        self.var_use_bg_image = tk.BooleanVar(value=False)
 
         self._setup_ui()
 
@@ -92,8 +232,8 @@ class PulseWaveApp:
         main_paned.pack(fill="both", expand=True, padx=14, pady=14)
 
         # Left Column: Controls & Configuration
-        left_frame = tk.Frame(main_paned, bg="#131B2E", padx=16, pady=16)
-        main_paned.add(left_frame, minsize=380, width=420)
+        left_frame = tk.Frame(main_paned, bg="#131B2E", padx=14, pady=12)
+        main_paned.add(left_frame, minsize=400, width=430)
 
         # Right Column: Visualizer Preview & Timeline
         right_frame = tk.Frame(main_paned, bg="#0B0F19")
@@ -111,9 +251,9 @@ class PulseWaveApp:
             fg="#38BDF8",
             bg="#131B2E",
             padx=10,
-            pady=10
+            pady=8
         )
-        file_box.pack(fill="x", pady=(0, 12))
+        file_box.pack(fill="x", pady=(0, 8))
 
         self.lbl_filename = tk.Label(
             file_box,
@@ -128,15 +268,16 @@ class PulseWaveApp:
         btn_row = tk.Frame(file_box, bg="#131B2E")
         btn_row.pack(fill="x")
 
-        btn_choose = tk.Button(
+        btn_choose = ActionButton(
             btn_row,
             text="Choose Audio File...",
             command=self.open_audio_file,
             bg="#0284C7",
-            fg="white",
-            relief="flat",
-            padx=12,
-            pady=6,
+            fg="#FFFFFF",
+            hover_bg="#0369A1",
+            active_bg="#075985",
+            padx=14,
+            pady=7,
             font=("Helvetica", 10, "bold"),
             cursor="hand2"
         )
@@ -160,9 +301,9 @@ class PulseWaveApp:
             fg="#38BDF8",
             bg="#131B2E",
             padx=10,
-            pady=10
+            pady=8
         )
-        style_box.pack(fill="x", pady=(0, 12))
+        style_box.pack(fill="x", pady=(0, 8))
 
         tk.Label(style_box, text="Preset Style:", fg="#E2E8F0", bg="#131B2E", font=("Helvetica", 9)).pack(anchor="w")
         cb_style = ttk.Combobox(
@@ -171,7 +312,7 @@ class PulseWaveApp:
             values=list(VISUALIZER_STYLES.keys()),
             state="readonly"
         )
-        cb_style.pack(fill="x", pady=(2, 8))
+        cb_style.pack(fill="x", pady=(1, 4))
         cb_style.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
 
         tk.Label(style_box, text="Color Theme:", fg="#E2E8F0", bg="#131B2E", font=("Helvetica", 9)).pack(anchor="w")
@@ -187,11 +328,11 @@ class PulseWaveApp:
             ],
             state="readonly"
         )
-        cb_theme.pack(fill="x", pady=(2, 8))
+        cb_theme.pack(fill="x", pady=(1, 4))
         cb_theme.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
 
         aspect_row = tk.Frame(style_box, bg="#131B2E")
-        aspect_row.pack(fill="x", pady=(2, 4))
+        aspect_row.pack(fill="x", pady=(1, 2))
         tk.Label(aspect_row, text="Aspect Ratio:", fg="#E2E8F0", bg="#131B2E", font=("Helvetica", 9)).pack(side="left")
         
         for asp in ["16:9 (Landscape)", "9:16 (Shorts/TikTok)", "1:1 (Square)"]:
@@ -215,9 +356,9 @@ class PulseWaveApp:
             fg="#38BDF8",
             bg="#131B2E",
             padx=10,
-            pady=10
+            pady=8
         )
-        text_box.pack(fill="x", pady=(0, 12))
+        text_box.pack(fill="x", pady=(0, 8))
 
         chk_text = tk.Checkbutton(
             text_box,
@@ -232,34 +373,130 @@ class PulseWaveApp:
 
         tk.Label(text_box, text="Track Title:", fg="#94A3B8", bg="#131B2E", font=("Helvetica", 9)).pack(anchor="w")
         entry_title = tk.Entry(text_box, textvariable=self.var_title, bg="#0B0F19", fg="white", insertbackground="white", bd=1)
-        entry_title.pack(fill="x", pady=(2, 6))
+        entry_title.pack(fill="x", pady=(2, 4))
         entry_title.bind("<KeyRelease>", lambda e: self.update_preview())
 
         tk.Label(text_box, text="Artist / Creator:", fg="#94A3B8", bg="#131B2E", font=("Helvetica", 9)).pack(anchor="w")
         entry_artist = tk.Entry(text_box, textvariable=self.var_artist, bg="#0B0F19", fg="white", insertbackground="white", bd=1)
-        entry_artist.pack(fill="x", pady=(2, 6))
+        entry_artist.pack(fill="x", pady=(2, 4))
         entry_artist.bind("<KeyRelease>", lambda e: self.update_preview())
 
-        # 4. Export Button & Status
-        export_box = tk.Frame(parent, bg="#131B2E")
-        export_box.pack(fill="x", side="bottom", pady=6)
+        # Scale text size slider
+        scale_row = tk.Frame(text_box, bg="#131B2E")
+        scale_row.pack(fill="x", pady=(4, 2))
 
-        self.btn_export = tk.Button(
+        lbl_scale_title = tk.Label(
+            scale_row,
+            text="Scale text size:",
+            fg="#94A3B8",
+            bg="#131B2E",
+            font=("Helvetica", 9)
+        )
+        lbl_scale_title.pack(side="left")
+
+        self.lbl_scale_val = tk.Label(
+            scale_row,
+            text="1.0x",
+            fg="#38BDF8",
+            bg="#131B2E",
+            font=("Helvetica", 9, "bold"),
+            width=5
+        )
+        self.lbl_scale_val.pack(side="right")
+
+        self.slider_text_scale = tk.Scale(
+            scale_row,
+            from_=1.0,
+            to=3.5,
+            resolution=0.1,
+            orient="horizontal",
+            variable=self.var_text_scale,
+            showvalue=False,
+            bg="#131B2E",
+            fg="#E2E8F0",
+            troughcolor="#0B0F19",
+            activebackground="#38BDF8",
+            highlightthickness=0,
+            bd=0,
+            command=self._on_scale_slider_change
+        )
+        self.slider_text_scale.pack(fill="x", expand=True, padx=6)
+
+        # 4. Background Image Section
+        bg_box = tk.LabelFrame(
+            parent,
+            text=" 4. BACKGROUND IMAGE ",
+            font=("Helvetica", 10, "bold"),
+            fg="#38BDF8",
+            bg="#131B2E",
+            padx=10,
+            pady=8
+        )
+        bg_box.pack(fill="x", pady=(0, 8))
+
+        chk_bg = tk.Checkbutton(
+            bg_box,
+            text="Use Background Image",
+            variable=self.var_use_bg_image,
+            fg="#E2E8F0",
+            bg="#131B2E",
+            selectcolor="#0B0F19",
+            command=self._on_toggle_bg_image
+        )
+        chk_bg.pack(anchor="w", pady=(0, 4))
+
+        bg_btn_row = tk.Frame(bg_box, bg="#131B2E")
+        bg_btn_row.pack(fill="x")
+
+        btn_choose_bg = ActionButton(
+            bg_btn_row,
+            text="Choose Image...",
+            command=self.open_bg_image_file,
+            bg="#0284C7",
+            fg="#FFFFFF",
+            hover_bg="#0369A1",
+            active_bg="#075985",
+            padx=10,
+            pady=5,
+            font=("Helvetica", 9, "bold"),
+            cursor="hand2"
+        )
+        btn_choose_bg.pack(side="left")
+
+        self.lbl_bg_filename = tk.Label(
+            bg_btn_row,
+            text="No image selected",
+            fg="#94A3B8",
+            bg="#131B2E",
+            font=("Helvetica", 9),
+            anchor="w",
+            padx=8
+        )
+        self.lbl_bg_filename.pack(side="left", fill="x", expand=True)
+
+        # 5. Export Button & Status
+        export_box = tk.Frame(parent, bg="#131B2E")
+        export_box.pack(fill="x", side="bottom", pady=4)
+
+        self.btn_export = ActionButton(
             export_box,
             text="Render & Export Video (.mp4)",
             command=self.start_video_export,
-            bg="#10B981",
-            fg="white",
-            relief="flat",
+            bg="#059669",
+            fg="#FFFFFF",
+            hover_bg="#047857",
+            active_bg="#065F46",
+            disabled_bg="#1E293B",
+            disabled_fg="#94A3B8",
             padx=14,
-            pady=10,
+            pady=8,
             font=("Helvetica", 11, "bold"),
             cursor="hand2"
         )
         self.btn_export.pack(fill="x")
 
         self.progress_bar = ttk.Progressbar(export_box, orient="horizontal", mode="determinate")
-        self.progress_bar.pack(fill="x", pady=(8, 4))
+        self.progress_bar.pack(fill="x", pady=(5, 3))
 
         self.lbl_progress = tk.Label(
             export_box,
@@ -320,6 +557,37 @@ class PulseWaveApp:
             messagebox.showerror("Audio Load Error", f"Failed to load audio: {str(e)}")
             self.lbl_progress.config(text="Audio load error.")
 
+    def _on_scale_slider_change(self, val):
+        try:
+            v = float(val)
+            self.lbl_scale_val.config(text=f"{v:.1f}x")
+        except Exception:
+            pass
+        self.update_preview()
+
+    def _on_toggle_bg_image(self):
+        if self.var_use_bg_image.get() and not self.bg_image_path:
+            self.open_bg_image_file()
+        else:
+            self.update_preview()
+
+    def open_bg_image_file(self):
+        filetypes = [
+            ("Image Files", "*.png *.jpg *.jpeg *.webp *.bmp *.tiff"),
+            ("All Files", "*.*")
+        ]
+        chosen = filedialog.askopenfilename(title="Select Background Image", filetypes=filetypes)
+        if chosen:
+            self.bg_image_path = chosen
+            try:
+                self.bg_image_pil = Image.open(chosen).convert("RGB")
+                fname = os.path.basename(chosen)
+                self.lbl_bg_filename.config(text=fname)
+                self.var_use_bg_image.set(True)
+                self.update_preview()
+            except Exception as e:
+                messagebox.showerror("Image Load Error", f"Failed to load image: {str(e)}")
+
     def update_preview(self):
         width = self.canvas_preview.winfo_width()
         height = self.canvas_preview.winfo_height()
@@ -337,7 +605,9 @@ class PulseWaveApp:
             title=self.var_title.get() if self.var_text_overlay.get() else "",
             artist=self.var_artist.get() if self.var_text_overlay.get() else "",
             audio_engine=self.audio_engine if self.audio_engine.is_loaded else None,
-            timestamp=frame_time
+            timestamp=frame_time,
+            text_scale=self.var_text_scale.get(),
+            bg_image=self.bg_image_pil if self.var_use_bg_image.get() else None
         )
 
         self.preview_image = ImageTk.PhotoImage(img)
@@ -386,7 +656,9 @@ class PulseWaveApp:
                 fps=self.var_fps.get(),
                 title=self.var_title.get() if self.var_text_overlay.get() else "",
                 artist=self.var_artist.get() if self.var_text_overlay.get() else "",
-                progress_fn=progress_callback
+                progress_fn=progress_callback,
+                text_scale=self.var_text_scale.get(),
+                bg_image=self.bg_image_pil if self.var_use_bg_image.get() else None
             )
             self.root.after(0, lambda: self._export_finished(output_path, None))
         except Exception as e:

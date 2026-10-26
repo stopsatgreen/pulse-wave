@@ -6,7 +6,31 @@ Draws visualizer frames and encodes H.264 MP4 with synchronized audio.
 import math
 import subprocess
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+
+def get_system_font(size):
+    """
+    Loads the default system font (San Francisco or Helvetica on macOS) at the given size.
+    Falls back gracefully if specific font files are unavailable.
+    """
+    candidates = [
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/SFNSText.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "Helvetica.ttc",
+        "Arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
 
 VISUALIZER_STYLES = {
     "circular-spectrum": "Circular Radial Pulse",
@@ -54,15 +78,55 @@ class VideoRenderer:
     def __init__(self):
         pass
 
-    def render_frame_pil(self, width, height, style, theme, aspect, title="", artist="", audio_engine=None, timestamp=0.0):
+    def prepare_background_image(self, bg_image, width, height):
+        """
+        Scales and center-crops a PIL image to fill width x height without distortion.
+        Applies a subtle dimming overlay to ensure neon visualizers and text stand out.
+        """
+        if bg_image is None:
+            return None
+        iw, ih = bg_image.size
+        if iw == width and ih == height:
+            cropped = bg_image.copy()
+        else:
+            scale = max(width / iw, height / ih)
+            new_w = max(1, int(iw * scale))
+            new_h = max(1, int(ih * scale))
+            resample = Image.Resampling.BILINEAR if max(width, height) <= 800 else Image.Resampling.LANCZOS
+            resized = bg_image.resize((new_w, new_h), resample)
+            crop_x = (new_w - width) // 2
+            crop_y = (new_h - height) // 2
+            cropped = resized.crop((crop_x, crop_y, crop_x + width, crop_y + height)).convert("RGB")
+
+        # Subtle dimming (0.78 brightness) ensures glowing visualizers and text are crisp and high-contrast
+        enhancer = ImageEnhance.Brightness(cropped)
+        return enhancer.enhance(0.78)
+
+    def render_frame_pil(self, width, height, style, theme, aspect, title="", artist="", audio_engine=None, timestamp=0.0, text_scale=1.0, bg_image=None):
         theme_colors = COLOR_THEMES.get(theme, COLOR_THEMES["Cyber Neon (Cyan & Pink)"])
         bg_color = theme_colors["bg"]
         primary = theme_colors["primary"]
         secondary = theme_colors["secondary"]
         accent = theme_colors["accent"]
 
-        img = Image.new("RGB", (width, height), bg_color)
-        draw = ImageDraw.Draw(img)
+        if bg_image is not None:
+            if isinstance(bg_image, str):
+                try:
+                    loaded = Image.open(bg_image)
+                    img = self.prepare_background_image(loaded, width, height)
+                except Exception:
+                    img = Image.new("RGB", (width, height), bg_color)
+            elif isinstance(bg_image, Image.Image):
+                if bg_image.size == (width, height):
+                    img = bg_image.copy()
+                else:
+                    img = self.prepare_background_image(bg_image, width, height)
+            else:
+                img = Image.new("RGB", (width, height), bg_color)
+            draw = ImageDraw.Draw(img)
+        else:
+            img = Image.new("RGB", (width, height), bg_color)
+            draw = ImageDraw.Draw(img)
 
         # Get audio FFT bins if engine available
         num_bars = 64
@@ -156,14 +220,39 @@ class VideoRenderer:
                 draw.line([(x1, y1), (x2, y2)], fill=accent, width=2)
 
         # Text Overlay
-        if title:
-            draw.text((cx, int(height * 0.15)), title, fill=(255, 255, 255), anchor="mm")
-        if artist:
-            draw.text((cx, int(height * 0.20)), artist, fill=(180, 190, 210), anchor="mm")
+        if title or artist:
+            # Baseline font sizes (minimum size at scale 1.0)
+            base_title_size = max(11, int(height * 0.024))
+            base_artist_size = max(10, int(base_title_size * 0.75))
+
+            eff_scale = max(1.0, float(text_scale))
+            title_size = max(10, int(base_title_size * eff_scale))
+            artist_size = max(9, int(base_artist_size * eff_scale))
+
+            title_font = get_system_font(title_size)
+            artist_font = get_system_font(artist_size)
+
+            top_y = max(int(height * 0.07), int(title_size * 0.75))
+            if title and artist:
+                title_y = top_y
+                gap = int(title_size * 0.5 + artist_size * 0.5 + 4)
+                artist_y = title_y + gap
+            elif title:
+                title_y = top_y
+            elif artist:
+                artist_y = top_y
+
+            # Draw with subtle drop shadow for maximum legibility over background images
+            if title:
+                draw.text((cx + 1, title_y + 1), title, font=title_font, fill=(0, 0, 0, 200), anchor="mm")
+                draw.text((cx, title_y), title, font=title_font, fill=(255, 255, 255), anchor="mm")
+            if artist:
+                draw.text((cx + 1, artist_y + 1), artist, font=artist_font, fill=(0, 0, 0, 180), anchor="mm")
+                draw.text((cx, artist_y), artist, font=artist_font, fill=(180, 190, 210), anchor="mm")
 
         return img
 
-    def export_video(self, audio_path, output_path, audio_engine, style, theme, aspect, fps, title, artist, progress_fn=None):
+    def export_video(self, audio_path, output_path, audio_engine, style, theme, aspect, fps, title, artist, progress_fn=None, text_scale=1.0, bg_image=None):
         """Streams rendered frames directly to ffmpeg for fast, lossless MP4 video export"""
         # Determine resolution
         if aspect == "9:16":
@@ -172,6 +261,18 @@ class VideoRenderer:
             width, height = 1080, 1080
         else: # 16:9
             width, height = 1920, 1080
+
+        # Pre-prepare background image once if provided for high-speed frame rendering
+        prepared_bg = None
+        if bg_image is not None:
+            if isinstance(bg_image, str):
+                try:
+                    loaded = Image.open(bg_image)
+                    prepared_bg = self.prepare_background_image(loaded, width, height)
+                except Exception:
+                    pass
+            elif isinstance(bg_image, Image.Image):
+                prepared_bg = self.prepare_background_image(bg_image, width, height)
 
         duration = audio_engine.get_duration()
         total_frames = int(duration * fps)
@@ -209,7 +310,9 @@ class VideoRenderer:
                 title=title,
                 artist=artist,
                 audio_engine=audio_engine,
-                timestamp=timestamp
+                timestamp=timestamp,
+                text_scale=text_scale,
+                bg_image=prepared_bg
             )
 
             # Write raw bytes to ffmpeg pipe

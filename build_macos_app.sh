@@ -39,7 +39,7 @@ pip install -r requirements.txt
 
 # 5. Build with PyInstaller
 echo "🔨 3. Compiling macOS Application Bundle (.app) with PyInstaller..."
-pyinstaller AudioVisualizer.spec --noconfirm --clean
+PYINSTALLER_CONFIG_DIR="$(pwd)/.pyinstaller_cache" pyinstaller AudioVisualizer.spec --noconfirm
 
 # 6. Verify Output
 if [ -d "dist/PulseWave.app" ]; then
